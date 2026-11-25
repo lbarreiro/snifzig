@@ -27,6 +27,9 @@ static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 45000;
 static constexpr uint32_t WIFI_SHUTDOWN_TIMEOUT_MS = 10000;
 static constexpr uint32_t UPLOAD_RETRY_DELAY_MS = 300000;
 static constexpr gpio_num_t STATUS_LED_GPIO = GPIO_NUM_15;
+static constexpr gpio_num_t OTA_BUTTON_GPIO = GPIO_NUM_9;
+static constexpr uint32_t OTA_BUTTON_HOLD_MS = 3000;
+static constexpr uint32_t OTA_MAINTENANCE_WINDOW_MS = 600000;
 static constexpr uint32_t STATUS_LED_PERIOD_MS = 1000;
 static constexpr uint32_t STATUS_LED_PULSE_MS = 120;
 static constexpr uint32_t CSV_HTTP_TIMEOUT_MS = 20000;
@@ -55,6 +58,14 @@ void SnifzigCapture::setup() {
   // The XIAO ESP32-C6 user LED is active-low; start with it off.
   ESP_ERROR_CHECK(gpio_set_level(STATUS_LED_GPIO, 1));
 
+  gpio_config_t ota_button_config{};
+  ota_button_config.pin_bit_mask = 1ULL << OTA_BUTTON_GPIO;
+  ota_button_config.mode = GPIO_MODE_INPUT;
+  ota_button_config.pull_up_en = GPIO_PULLUP_ENABLE;
+  ota_button_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  ota_button_config.intr_type = GPIO_INTR_DISABLE;
+  ESP_ERROR_CHECK(gpio_config(&ota_button_config));
+
   ESP_ERROR_CHECK(esp_ieee802154_enable());
   ESP_ERROR_CHECK(esp_ieee802154_set_channel(this->channel_));
   ESP_ERROR_CHECK(esp_ieee802154_set_promiscuous(true));
@@ -63,7 +74,7 @@ void SnifzigCapture::setup() {
   ESP_ERROR_CHECK(esp_ieee802154_receive());
 
   ESP_LOGI(TAG, "Passive capture started on Zigbee channel %u", this->channel_);
-  ESP_LOGI(TAG, "Wi-Fi will stay off until the capture buffer is full");
+  ESP_LOGI(TAG, "Wi-Fi stays off during capture; hold BOOT for 3 seconds for OTA maintenance");
   ESP_LOGI(TAG, "RAM ring capacity: %u frames", CAPTURE_RING_CAPACITY);
 }
 
@@ -71,15 +82,33 @@ void SnifzigCapture::loop() {
   const uint32_t now = millis();
 
   // Short heartbeat pulse only while the 802.15.4 receiver is capturing.
-  const bool led_should_be_on = this->state_ == UploadState::CAPTURING &&
-      (now % STATUS_LED_PERIOD_MS) < STATUS_LED_PULSE_MS;
+  const bool wifi_connected_for_ota = this->state_ == UploadState::OTA_MAINTENANCE &&
+      wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
+  const bool led_should_be_on = wifi_connected_for_ota ||
+      (this->state_ == UploadState::CAPTURING &&
+       (now % STATUS_LED_PERIOD_MS) < STATUS_LED_PULSE_MS);
   if (led_should_be_on != this->status_led_on_) {
     gpio_set_level(STATUS_LED_GPIO, led_should_be_on ? 0 : 1);
     this->status_led_on_ = led_should_be_on;
   }
 
   if (this->state_ == UploadState::CAPTURING) {
-    if (this->get_stats().records_in_buffer >= CAPTURE_RING_CAPACITY) {
+    const bool ota_button_pressed = gpio_get_level(OTA_BUTTON_GPIO) == 0;
+    if (ota_button_pressed) {
+      if (!this->ota_button_held_) {
+        this->ota_button_held_ = true;
+        this->ota_button_started_ms_ = now;
+      } else if (now - this->ota_button_started_ms_ >= OTA_BUTTON_HOLD_MS) {
+        this->ota_button_held_ = false;
+        this->begin_ota_maintenance_();
+        return;
+      }
+    } else {
+      this->ota_button_held_ = false;
+    }
+
+    // Let a deliberate long press enter OTA mode even if the capture buffer fills.
+    if (!ota_button_pressed && this->get_stats().records_in_buffer >= CAPTURE_RING_CAPACITY) {
       this->begin_upload_();
     }
 
@@ -95,6 +124,37 @@ void SnifzigCapture::loop() {
                static_cast<unsigned>(stats.invalid_frames),
                static_cast<unsigned>(stats.rx_release_errors),
                static_cast<unsigned>(stats.rx_restart_errors));
+    }
+    return;
+  }
+
+  if (this->state_ == UploadState::OTA_MAINTENANCE) {
+    const bool connected = wifi::global_wifi_component != nullptr &&
+                           wifi::global_wifi_component->is_connected();
+    const bool window_expired = now - this->state_started_ms_ >= OTA_MAINTENANCE_WINDOW_MS;
+    const bool connection_timed_out = !connected &&
+        now - this->state_started_ms_ >= WIFI_CONNECT_TIMEOUT_MS;
+    if (window_expired || connection_timed_out) {
+      ESP_LOGI(TAG, window_expired ? "OTA maintenance window ended" :
+               "Wi-Fi connection timed out during OTA maintenance");
+      this->end_ota_maintenance_();
+    }
+    return;
+  }
+
+  if (this->state_ == UploadState::OTA_WIFI_OFF) {
+    const bool wifi_is_off = wifi::global_wifi_component == nullptr ||
+                              wifi::global_wifi_component->is_disabled();
+    if (wifi_is_off) {
+      this->upload_succeeded_ = false;
+      this->resume_capture_();
+      return;
+    }
+    if (now - this->state_started_ms_ >= WIFI_SHUTDOWN_TIMEOUT_MS) {
+      if (wifi::global_wifi_component != nullptr) {
+        wifi::global_wifi_component->disable();
+      }
+      this->state_started_ms_ = now;
     }
     return;
   }
@@ -147,6 +207,35 @@ void SnifzigCapture::loop() {
   if (this->state_ == UploadState::RETRY_WAIT &&
       static_cast<int32_t>(now - this->retry_due_ms_) >= 0) {
     this->begin_upload_();
+  }
+}
+
+void SnifzigCapture::begin_ota_maintenance_() {
+  if (wifi::global_wifi_component == nullptr) {
+    ESP_LOGE(TAG, "Cannot start OTA maintenance: ESPHome Wi-Fi component is unavailable");
+    return;
+  }
+
+  const esp_err_t sleep_result = esp_ieee802154_sleep();
+  if (sleep_result != ESP_OK) {
+    ESP_LOGW(TAG, "Could not put 802.15.4 radio to sleep for OTA: %s",
+             esp_err_to_name(sleep_result));
+  }
+
+  this->upload_succeeded_ = false;
+  this->state_started_ms_ = millis();
+  this->state_ = UploadState::OTA_MAINTENANCE;
+  gpio_set_level(STATUS_LED_GPIO, 1);
+  this->status_led_on_ = false;
+  wifi::global_wifi_component->enable();
+  ESP_LOGI(TAG, "OTA maintenance started for 10 minutes; Wi-Fi enabled");
+}
+
+void SnifzigCapture::end_ota_maintenance_() {
+  this->state_started_ms_ = millis();
+  this->state_ = UploadState::OTA_WIFI_OFF;
+  if (wifi::global_wifi_component != nullptr) {
+    wifi::global_wifi_component->disable();
   }
 }
 
