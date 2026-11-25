@@ -1,0 +1,15 @@
+.esphome/
+build/
+.pioenvs/
+.piolibdeps/
+
+# Secrets and local ESPHome configuration
+**/secrets.yaml
+secrets.yaml
+
+# Captures and generated reports
+captures/
+data/
+*.pcap
+*.pcapng
+*.csv

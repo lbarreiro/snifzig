@@ -1,0 +1,43 @@
+substitutions:
+  # Replace with your own ntfy server and topic in the local configuration.
+  ntfy_publish_url: "https://ntfy.example.org/YOUR_TOPIC"
+
+esphome:
+  name: snifzig
+  friendly_name: Snifzig
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/lbarreiro/snifzig
+      ref: main
+      path: components
+    components: [snifzig_capture]
+
+esp32:
+  board: seeed_xiao_esp32c6
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_IEEE802154_ENABLED: "y"
+      CONFIG_IEEE802154_RX_BUFFER_SIZE: "20"
+      CONFIG_MBEDTLS_CERTIFICATE_BUNDLE: "y"
+    advanced:
+      include_builtin_idf_components:
+        - ieee802154
+        - esp_http_client
+        - mbedtls
+
+wifi:
+  ssid: !secret snifzig_wifi_ssid
+  password: !secret snifzig_wifi_password
+  enable_on_boot: false
+  reboot_timeout: 0s
+  power_save_mode: none
+
+logger:
+  level: INFO
+
+snifzig_capture:
+  channel: 11
+  ntfy_publish_url: "${ntfy_publish_url}"
