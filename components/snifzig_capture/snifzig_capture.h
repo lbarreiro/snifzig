@@ -72,6 +72,7 @@ class SnifzigCapture : public Component {
   uint32_t batch_number_{0};
   UploadState state_{UploadState::CAPTURING};
   bool upload_succeeded_{false};
+  bool status_led_on_{false};
   std::string ntfy_publish_url_;
   std::string ntfy_authorization_;
   CaptureRecord ring_[CAPTURE_RING_CAPACITY]{};
