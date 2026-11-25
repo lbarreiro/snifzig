@@ -18,6 +18,7 @@ Projeto experimental para observar tráfego Zigbee 802.15.4 com um Seeed Studio 
 3. Envia as tramas e os metadados como um CSV anexo ao ntfy.
 4. Só depois de uma resposta HTTP de sucesso limpa o buffer, desliga o Wi-Fi e retoma a captura.
 5. Se a ligação ou o envio falhar, mantém o bloco em RAM e tenta novamente após cinco minutos.
+6. Para atualizar o firmware, manter o botão BOOT premido por três segundos após o arranque abre uma janela OTA de dez minutos; o Wi-Fi desliga-se no fim e a captura retoma.
 
 ## Limites técnicos
 
@@ -26,7 +27,7 @@ Projeto experimental para observar tráfego Zigbee 802.15.4 com um Seeed Studio 
 - O driver entrega o cabeçalho MAC e o payload MAC sem o FCS; RSSI e LQI são metadados separados. O conteúdo de aplicação Zigbee pode estar cifrado.
 - O buffer atual tem capacidade inicial para 128 tramas. Ao faltar energia ou reiniciar antes do envio, o bloco em RAM perde-se.
 - A placa é a Seeed Studio XIAO ESP32-C6 e o firmware seleciona a antena cerâmica integrada.
-- O LED de utilizador laranja (GPIO15) pisca brevemente durante a captura e apaga-se quando o Wi-Fi é ativado.
+- O LED de utilizador laranja (GPIO15) pisca brevemente durante a captura, fica fixo quando o Wi-Fi liga no modo de manutenção OTA e fica apagado durante o envio ntfy.
 - As credenciais Wi-Fi ficam em `secrets.yaml` local, ignorado pelo Git. O endereço e tópico ntfy devem ser definidos apenas na configuração local do ESPHome.
 
 ## Estado
