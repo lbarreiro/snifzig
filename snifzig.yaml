@@ -13,6 +13,7 @@ external_components:
       ref: main
       path: components
     components: [snifzig_capture]
+    refresh: 1min
 
 esp32:
   board: seeed_xiao_esp32c6
@@ -37,6 +38,9 @@ wifi:
 
 logger:
   level: INFO
+
+ota:
+  - platform: esphome
 
 snifzig_capture:
   channel: 11
