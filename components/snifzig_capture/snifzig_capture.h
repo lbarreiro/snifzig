@@ -57,11 +57,15 @@ class SnifzigCapture : public Component {
     WAITING_FOR_WIFI,
     WAITING_FOR_WIFI_OFF,
     RETRY_WAIT,
+    OTA_MAINTENANCE,
+    OTA_WIFI_OFF,
   };
 
   bool build_csv_(size_t *csv_size);
   bool send_csv_();
   void begin_upload_();
+  void begin_ota_maintenance_();
+  void end_ota_maintenance_();
   void finish_upload_(bool success);
   void resume_capture_();
 
@@ -73,6 +77,8 @@ class SnifzigCapture : public Component {
   UploadState state_{UploadState::CAPTURING};
   bool upload_succeeded_{false};
   bool status_led_on_{false};
+  bool ota_button_held_{false};
+  uint32_t ota_button_started_ms_{0};
   std::string ntfy_publish_url_;
   std::string ntfy_authorization_;
   CaptureRecord ring_[CAPTURE_RING_CAPACITY]{};
