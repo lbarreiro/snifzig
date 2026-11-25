@@ -28,6 +28,8 @@ A configuração e o componente implementam o ciclo:
 4. Limpar o buffer apenas após resposta HTTP de sucesso.
 5. Desativar Wi-Fi e retomar a captura.
 
+Para manutenção, manter o botão BOOT premido durante três segundos pausa o sniffer e abre uma janela OTA de dez minutos. Se não houver atualização, o Wi-Fi desliga-se e a captura retoma.
+
 Se a ligação ou o envio falhar, o bloco fica pendente em RAM e o dispositivo tenta de novo após cinco minutos. Ainda falta compilar e observar o primeiro envio real. O buffer perde-se se houver perda de energia antes do envio.
 
 ## 3. Analisar a rede da casa
