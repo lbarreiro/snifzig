@@ -26,6 +26,9 @@ static constexpr gpio_num_t RF_ANTENNA_SELECT_GPIO = GPIO_NUM_14;
 static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 45000;
 static constexpr uint32_t WIFI_SHUTDOWN_TIMEOUT_MS = 10000;
 static constexpr uint32_t UPLOAD_RETRY_DELAY_MS = 300000;
+static constexpr gpio_num_t STATUS_LED_GPIO = GPIO_NUM_15;
+static constexpr uint32_t STATUS_LED_PERIOD_MS = 1000;
+static constexpr uint32_t STATUS_LED_PULSE_MS = 120;
 static constexpr uint32_t CSV_HTTP_TIMEOUT_MS = 20000;
 
 void SnifzigCapture::setup() {
@@ -42,6 +45,16 @@ void SnifzigCapture::setup() {
   ESP_ERROR_CHECK(gpio_set_level(RF_SWITCH_ENABLE_GPIO, 0));
   ESP_ERROR_CHECK(gpio_set_level(RF_ANTENNA_SELECT_GPIO, 0));
 
+  gpio_config_t status_led_config{};
+  status_led_config.pin_bit_mask = 1ULL << STATUS_LED_GPIO;
+  status_led_config.mode = GPIO_MODE_OUTPUT;
+  status_led_config.pull_up_en = GPIO_PULLUP_DISABLE;
+  status_led_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  status_led_config.intr_type = GPIO_INTR_DISABLE;
+  ESP_ERROR_CHECK(gpio_config(&status_led_config));
+  // The XIAO ESP32-C6 user LED is active-low; start with it off.
+  ESP_ERROR_CHECK(gpio_set_level(STATUS_LED_GPIO, 1));
+
   ESP_ERROR_CHECK(esp_ieee802154_enable());
   ESP_ERROR_CHECK(esp_ieee802154_set_channel(this->channel_));
   ESP_ERROR_CHECK(esp_ieee802154_set_promiscuous(true));
@@ -56,6 +69,14 @@ void SnifzigCapture::setup() {
 
 void SnifzigCapture::loop() {
   const uint32_t now = millis();
+
+  // Short heartbeat pulse only while the 802.15.4 receiver is capturing.
+  const bool led_should_be_on = this->state_ == UploadState::CAPTURING &&
+      (now % STATUS_LED_PERIOD_MS) < STATUS_LED_PULSE_MS;
+  if (led_should_be_on != this->status_led_on_) {
+    gpio_set_level(STATUS_LED_GPIO, led_should_be_on ? 0 : 1);
+    this->status_led_on_ = led_should_be_on;
+  }
 
   if (this->state_ == UploadState::CAPTURING) {
     if (this->get_stats().records_in_buffer >= CAPTURE_RING_CAPACITY) {
@@ -148,6 +169,8 @@ void SnifzigCapture::begin_upload_() {
   this->upload_succeeded_ = false;
   this->state_started_ms_ = millis();
   this->state_ = UploadState::WAITING_FOR_WIFI;
+  gpio_set_level(STATUS_LED_GPIO, 1);
+  this->status_led_on_ = false;
   wifi::global_wifi_component->enable();
   ESP_LOGI(TAG, "Capture batch ready; enabling Wi-Fi for ntfy upload");
 }
