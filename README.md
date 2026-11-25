@@ -26,6 +26,7 @@ Projeto experimental para observar tráfego Zigbee 802.15.4 com um Seeed Studio 
 - O driver entrega o cabeçalho MAC e o payload MAC sem o FCS; RSSI e LQI são metadados separados. O conteúdo de aplicação Zigbee pode estar cifrado.
 - O buffer atual tem capacidade inicial para 128 tramas. Ao faltar energia ou reiniciar antes do envio, o bloco em RAM perde-se.
 - A placa é a Seeed Studio XIAO ESP32-C6 e o firmware seleciona a antena cerâmica integrada.
+- O LED de utilizador laranja (GPIO15) pisca brevemente durante a captura e apaga-se quando o Wi-Fi é ativado.
 - As credenciais Wi-Fi ficam em `secrets.yaml` local, ignorado pelo Git. O endereço e tópico ntfy devem ser definidos apenas na configuração local do ESPHome.
 
 ## Estado
