@@ -17,7 +17,7 @@ Cada notificação inclui:
 - total de tramas recebidas e classificação MAC básica (beacon, dados, ACK, comando e outros);
 - RSSI e LQI mínimo, médio e máximo;
 - distribuição de RSSI e LQI por intervalos;
-- erros de receção observados pelo driver.
+- erros de receção observados pelo driver;\n- classificações locais de RSSI, LQI e global (fraca, razoável, boa ou excelente), calculadas por faixas indicativas.
 
 Os intervalos correspondem ao tempo efetivo de captura; a pausa para ligar ao Wi-Fi e publicar o resumo fica fora da medição. O sniffer é passivo e só caracteriza o tráfego que chega ao local onde está instalado. Não mede diretamente entregas, retransmissões ou rotas entre outros dispositivos.
 
@@ -33,3 +33,4 @@ Os intervalos correspondem ao tempo efetivo de captura; a pausa para ligar ao Wi
 A configuração de exemplo está em `snifzig.yaml`. Usar a configuração local com as credenciais e o tópico ntfy próprios.
 
 Ver [docs/ROADMAP.md](docs/ROADMAP.md) para o estado e próximos passos.
+\nAs faixas LQI são subdivisões indicativas do intervalo de 8 bits (0–255), não limiares universais de qualidade da malha. A classificação global dá peso igual ao RSSI e ao LQI e descreve apenas a receção no local do Snifzig.\n
