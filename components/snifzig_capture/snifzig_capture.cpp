@@ -160,24 +160,35 @@ void SnifzigCapture::clear_stats_() {
   for (uint8_t i=0;i<4;i++) this->rssi_buckets_[i]=this->lqi_buckets_[i]=0;
   portEXIT_CRITICAL(&this->mux_);
 }
+static const char *quality_name(float score) {
+  if (score >= 3.5f) return "excelente";
+  if (score >= 2.75f) return "bom";
+  if (score >= 2.0f) return "razoavel";
+  return "fraco";
+}
 bool SnifzigCapture::send_report_() {
   const CaptureStats s=this->get_stats(); const uint32_t total=s.frames_received;
-  const float ra=total ? (float)s.rssi_sum/total : 0, la=total ? (float)s.lqi_sum/total : 0;
-  char body[768];
+  const float rssi_avg=total?(float)s.rssi_sum/total:0, lqi_avg=total?(float)s.lqi_sum/total:0;
+  const float rssi_score=total?((float)s.rssi_buckets[0]+2*s.rssi_buckets[1]+3*s.rssi_buckets[2]+4*s.rssi_buckets[3])/total:0;
+  const float lqi_score=total?((float)s.lqi_buckets[0]+2*s.lqi_buckets[1]+3*s.lqi_buckets[2]+4*s.lqi_buckets[3])/total:0;
+  const float global_score=(rssi_score+lqi_score)/2;
+  char body[900];
   const int n=snprintf(body,sizeof(body),
-    "Snifzig - resumo horario Zigbee\nCanal: %u | periodo: 60 min\nTramas recebidas: %lu\n"
-    "Tipos MAC: beacon %lu | dados %lu | ACK %lu | comando %lu | outros %lu\n"
-    "RSSI dBm: min %d | media %.1f | max %d\nRSSI: <=-90 %lu | -89..-80 %lu | -79..-70 %lu | >=-69 %lu\n"
-    "LQI: min %u | media %.1f | max %u\nLQI: <8 %lu | 8..9 %lu | 10..11 %lu | >=12 %lu\n"
-    "Erros RX: frames invalidos %lu | libertacao %lu | reinicio %lu\n"
-    "Medicao passiva neste local; nao confirma entrega nem rotas.",
+    "Snifzig - resumo horario Zigbee\\nCanal: %u | periodo: 60 min\\nTramas recebidas: %lu\\n"
+    "Tipos MAC: beacon %lu | dados %lu | ACK %lu | comando %lu | outros %lu\\n"
+    "RSSI dBm: min %d | media %.1f | max %d\\nRSSI: <=-90 %lu | -89..-80 %lu | -79..-70 %lu | >=-69 %lu\\n"
+    "LQI: min %u | media %.1f | max %u\\nLQI (0-255): 0..63 %lu | 64..127 %lu | 128..191 %lu | 192..255 %lu\\n"
+    "Erros RX: invalidos %lu | libertacao %lu | reinicio %lu\\n"
+    "Classificacao local (escala indicativa):\\nRSSI - %s (%.2f/4)\\nLQI - %s (%.2f/4)\\nGlobal - %s (%.2f/4)\\n"
+    "Medicao passiva no local; nao confirma entrega nem rotas.",
     this->channel_,(unsigned long)total,(unsigned long)s.frame_types[0],(unsigned long)s.frame_types[1],
     (unsigned long)s.frame_types[2],(unsigned long)s.frame_types[3],(unsigned long)s.frame_types[4],
-    total?s.rssi_min:0,ra,total?s.rssi_max:0,(unsigned long)s.rssi_buckets[0],(unsigned long)s.rssi_buckets[1],
+    total?s.rssi_min:0,rssi_avg,total?s.rssi_max:0,(unsigned long)s.rssi_buckets[0],(unsigned long)s.rssi_buckets[1],
     (unsigned long)s.rssi_buckets[2],(unsigned long)s.rssi_buckets[3],
-    total?s.lqi_min:0,la,total?s.lqi_max:0,(unsigned long)s.lqi_buckets[0],(unsigned long)s.lqi_buckets[1],
-    (unsigned long)s.lqi_buckets[2],(unsigned long)s.lqi_buckets[3],(unsigned long)s.invalid_frames,
-    (unsigned long)s.rx_release_errors,(unsigned long)s.rx_restart_errors);
+    total?s.lqi_min:0,lqi_avg,total?s.lqi_max:0,(unsigned long)s.lqi_buckets[0],(unsigned long)s.lqi_buckets[1],
+    (unsigned long)s.lqi_buckets[2],(unsigned long)s.lqi_buckets[3],
+    (unsigned long)s.invalid_frames,(unsigned long)s.rx_release_errors,(unsigned long)s.rx_restart_errors,
+    quality_name(rssi_score),rssi_score,quality_name(lqi_score),lqi_score,quality_name(global_score),global_score);
   if(n<=0 || (size_t)n>=sizeof(body)) return false;
   char title[72]; snprintf(title,sizeof(title),"Snifzig resumo horario #%lu",(unsigned long)this->report_number_);
   esp_http_client_config_t cfg{}; cfg.url=this->ntfy_publish_url_.c_str(); cfg.method=HTTP_METHOD_POST;
@@ -185,8 +196,7 @@ bool SnifzigCapture::send_report_() {
   esp_http_client_handle_t c=esp_http_client_init(&cfg); if(!c) return false;
   esp_err_t e=esp_http_client_set_header(c,"Content-Type","text/plain; charset=utf-8");
   if(e==ESP_OK) e=esp_http_client_set_header(c,"Title",title);
-  if(e==ESP_OK && !this->ntfy_authorization_.empty())
-    e=esp_http_client_set_header(c,"Authorization",this->ntfy_authorization_.c_str());
+  if(e==ESP_OK && !this->ntfy_authorization_.empty()) e=esp_http_client_set_header(c,"Authorization",this->ntfy_authorization_.c_str());
   if(e==ESP_OK) e=esp_http_client_open(c,n);
   if(e==ESP_OK && esp_http_client_write(c,body,n)!=n) e=ESP_FAIL;
   if(e!=ESP_OK) { esp_http_client_close(c); esp_http_client_cleanup(c); return false; }
@@ -206,8 +216,8 @@ void IRAM_ATTR SnifzigCapture::handle_frame(uint8_t *frame, esp_ieee802154_frame
     if(q<this->lqi_min_) this->lqi_min_=q; if(q>this->lqi_max_) this->lqi_max_=q;
     if(r<=-90) this->rssi_buckets_[0]++; else if(r<=-80) this->rssi_buckets_[1]++;
     else if(r<=-70) this->rssi_buckets_[2]++; else this->rssi_buckets_[3]++;
-    if(q<8) this->lqi_buckets_[0]++; else if(q<10) this->lqi_buckets_[1]++;
-    else if(q<12) this->lqi_buckets_[2]++; else this->lqi_buckets_[3]++;
+    if(q<64) this->lqi_buckets_[0]++; else if(q<128) this->lqi_buckets_[1]++;
+    else if(q<192) this->lqi_buckets_[2]++; else this->lqi_buckets_[3]++;
     const uint8_t t=len>=2?(frame[1]&7):4; this->frame_types_[t<=3?t:4]++;
   }
   portEXIT_CRITICAL_ISR(&this->mux_);
