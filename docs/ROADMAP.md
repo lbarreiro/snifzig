@@ -1,56 +1,29 @@
 # Plano de trabalho
 
-## 0. Provar a captura passiva dentro do ESPHome
+## 0. Captura passiva e indicadores horários
 
-O componente externo em `components/snifzig_capture` e a configuração `snifzig.yaml` implementam a captura no canal 11.
+O componente externo em `components/snifzig_capture` ouve o canal Zigbee configurado em modo passivo. Não adere à rede nem transmite.
 
-Critérios:
-- O C6 recebe tramas da rede Zigbee existente sem aderir a ela.
-- O sniffer não transmite nem altera a rede Zigbee.
-- O Wi-Fi fica desligado durante a captura.
-- São guardados os bytes recebidos do cabeçalho MAC e payload MAC, mais instante, canal, tamanho, RSSI e LQI quando disponibilizados pelo driver.
+O firmware mantém apenas estatísticas em RAM durante uma hora efetiva de captura:
+- total de tramas e classificação básica do tipo MAC;
+- mínimo, média, máximo e distribuição de RSSI/LQI;
+- erros reportados pelo driver.
 
-Ainda falta compilar e confirmar o comportamento na placa.
+No fim do período liga o Wi-Fi, publica um resumo em texto normal no ntfy, desliga o Wi-Fi e retoma a captura. Se o envio falhar, conserva os contadores e tenta novamente após cinco minutos. OTA continua disponível ao manter BOOT premido por três segundos, abrindo uma janela de dez minutos.
 
-## 1. Capturar e caracterizar
+## 1. Interpretar a observação local
 
-A primeira versão produz um CSV com uma linha por trama: bytes recebidos em hexadecimal e campos de receção separados. A análise decidirá quais campos e padrões são úteis.
+Comparar resumos de várias horas no mesmo local e observar tendências de RSSI/LQI e volume/tipos de tráfego. O Snifzig só ouve as tramas que chegam ao seu ponto de instalação; não confirma entregas nem conhece diretamente rotas ou retransmissões entre outros nós.
 
-Confirmar se os endereços disponíveis podem ser associados aos dispositivos do Zigbee2MQTT e o que é possível aprender sem a chave da rede. Não descodificar conteúdo de aplicação.
-
-## 2. Wi-Fi e ntfy
-
-A configuração e o componente implementam o ciclo:
-
-1. Capturar e armazenar até 128 tramas em RAM.
-2. Pausar a captura quando o buffer encher.
-3. Ativar Wi-Fi e enviar o CSV como anexo com HTTP PUT para ntfy.
-4. Limpar o buffer apenas após resposta HTTP de sucesso.
-5. Desativar Wi-Fi e retomar a captura.
-
-Para manutenção, manter o botão BOOT premido durante três segundos pausa o sniffer e abre uma janela OTA de dez minutos. Se não houver atualização, o Wi-Fi desliga-se e a captura retoma.
-
-Se a ligação ou o envio falhar, o bloco fica pendente em RAM e o dispositivo tenta de novo após cinco minutos. Ainda falta compilar e observar o primeiro envio real. O buffer perde-se se houver perda de energia antes do envio.
-
-## 3. Analisar a rede da casa
-
-Para cada captura, calcular contagens e distribuições de RSSI/LQI por endereço de origem e intervalo temporal. Comparar capturas feitas no mesmo local e, se o Zigbee2MQTT mudar do canal 11 para o 25, comparar os resultados antes e depois da migração.
-
-Durante cada envio ntfy, o C6 deixa de ouvir algumas tramas; a rede Zigbee da casa continua ativa.
+A publicação e a janela OTA interrompem a escuta do Snifzig durante alguns segundos, mas não alteram o funcionamento da rede Zigbee.
 
 ## Decisões confirmadas
 
 - Placa: Seeed Studio XIAO ESP32-C6.
 - Canal inicial: 11.
-- Antena inicial: cerâmica integrada.
-- Captura: bytes da trama recebida mais metadados; a análise decidirá depois quais campos importam.
-- Armazenamento: RAM, sem escrita contínua na flash.
-- Arquitetura: ESPHome com componente externo; sem aplicação autónoma ESP-IDF.
-- O Wi-Fi só é ativado para publicar um lote ntfy.
-
-## Por decidir durante a implementação
-
-- Aumentar ou não o lote de 128 tramas, após medir a taxa real.
-- Definir o tempo máximo de captura entre envios, se não houver tráfego suficiente para encher o buffer.
-- Rever a codificação CSV e tamanho de anexos após o primeiro ficheiro real.
-- Confirmar localmente o endereço do servidor ntfy, o tópico e se é necessária autenticação; não guardar o endereço pessoal nem credenciais no Git.
+- Antena: cerâmica integrada.
+- Arquitetura: ESPHome com componente externo.
+- Wi-Fi desligado durante a captura.
+- Sem guardar tramas completas nem anexar CSV; apenas contadores temporários em RAM.
+- Notificações ntfy em texto, uma por hora de captura.
+- Endpoint e credenciais ficam apenas na configuração local e em secrets, nunca no Git.
