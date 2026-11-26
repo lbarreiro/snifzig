@@ -1,6 +1,5 @@
 #pragma once
 
-#include <stddef.h>
 #include <stdint.h>
 #include <string>
 
@@ -13,28 +12,22 @@
 namespace esphome {
 namespace snifzig_capture {
 
-static constexpr uint16_t CAPTURE_RING_CAPACITY = 128;
-static constexpr uint8_t MAX_MAC_FRAME_LENGTH = 127;
-static constexpr size_t MAX_CSV_BUFFER_BYTES =
-    CAPTURE_RING_CAPACITY * (MAX_MAC_FRAME_LENGTH * 2 + 96) + 128;
-
-struct CaptureRecord {
-  uint32_t sequence;
-  uint64_t sfd_timestamp;
-  int8_t rssi_dbm;
-  uint8_t lqi;
-  uint8_t channel;
-  uint8_t length;
-  uint8_t bytes[MAX_MAC_FRAME_LENGTH];
-};
+static constexpr uint32_t STATS_INTERVAL_MS = 3600000;
 
 struct CaptureStats {
   uint32_t frames_received;
-  uint32_t records_overwritten;
   uint32_t invalid_frames;
   uint32_t rx_release_errors;
   uint32_t rx_restart_errors;
-  uint16_t records_in_buffer;
+  uint32_t frame_types[5];  // beacon, data, ACK, MAC command, reserved/unknown
+  uint32_t rssi_buckets[4]; // <=-90, -89..-80, -79..-70, >=-69 dBm
+  uint32_t lqi_buckets[4];  // <8, 8..9, 10..11, >=12
+  int32_t rssi_sum;
+  uint32_t lqi_sum;
+  int8_t rssi_min;
+  int8_t rssi_max;
+  uint8_t lqi_min;
+  uint8_t lqi_max;
 };
 
 class SnifzigCapture : public Component {
@@ -47,7 +40,6 @@ class SnifzigCapture : public Component {
   void loop() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
-  bool copy_record(uint16_t index, CaptureRecord *out) const;
   CaptureStats get_stats() const;
   void IRAM_ATTR handle_frame(uint8_t *frame, esp_ieee802154_frame_info_t *frame_info);
 
@@ -61,8 +53,8 @@ class SnifzigCapture : public Component {
     OTA_WIFI_OFF,
   };
 
-  bool build_csv_(size_t *csv_size);
-  bool send_csv_();
+  bool send_report_();
+  void clear_stats_();
   void begin_upload_();
   void begin_ota_maintenance_();
   void end_ota_maintenance_();
@@ -73,7 +65,7 @@ class SnifzigCapture : public Component {
   uint32_t last_report_ms_{0};
   uint32_t state_started_ms_{0};
   uint32_t retry_due_ms_{0};
-  uint32_t batch_number_{0};
+  uint32_t report_number_{1};
   UploadState state_{UploadState::CAPTURING};
   bool upload_succeeded_{false};
   bool status_led_on_{false};
@@ -81,17 +73,21 @@ class SnifzigCapture : public Component {
   uint32_t ota_button_started_ms_{0};
   std::string ntfy_publish_url_;
   std::string ntfy_authorization_;
-  CaptureRecord ring_[CAPTURE_RING_CAPACITY]{};
-  char csv_buffer_[MAX_CSV_BUFFER_BYTES]{};
   mutable portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
-  uint16_t head_{0};
-  uint16_t count_{0};
   uint32_t frames_received_{0};
-  uint32_t records_overwritten_{0};
   uint32_t invalid_frames_{0};
   uint32_t rx_release_errors_{0};
   uint32_t rx_restart_errors_{0};
+  uint32_t frame_types_[5]{};
+  uint32_t rssi_buckets_[4]{};
+  uint32_t lqi_buckets_[4]{};
+  int32_t rssi_sum_{0};
+  uint32_t lqi_sum_{0};
+  int8_t rssi_min_{127};
+  int8_t rssi_max_{-128};
+  uint8_t lqi_min_{255};
+  uint8_t lqi_max_{0};
 };
 
 }  // namespace snifzig_capture
-}
+}  // namespace esphome
