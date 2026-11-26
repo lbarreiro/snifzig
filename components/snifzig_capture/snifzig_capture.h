@@ -21,7 +21,7 @@ struct CaptureStats {
   uint32_t rx_restart_errors;
   uint32_t frame_types[5];  // beacon, data, ACK, MAC command, reserved/unknown
   uint32_t rssi_buckets[4]; // <=-90, -89..-80, -79..-70, >=-69 dBm
-  uint32_t lqi_buckets[4];  // <8, 8..9, 10..11, >=12
+  uint32_t lqi_buckets[4];  // 0..63, 64..127, 128..191, 192..255
   int32_t rssi_sum;
   uint32_t lqi_sum;
   int8_t rssi_min;
