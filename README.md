@@ -1,41 +1,35 @@
 # snifzig
 
-Projeto experimental para observar tráfego Zigbee 802.15.4 com um Seeed Studio XIAO ESP32-C6, preservar tramas capturadas em RAM e enviar blocos CSV como anexo para ntfy.
+Projeto experimental para observar indicadores da rede Zigbee 802.15.4 com um Seeed Studio XIAO ESP32-C6, em modo passivo.
 
-## Objetivo
+## Objetivo e recolha
 
-- Ouvir passivamente a rede Zigbee no canal 11, sem aderir à rede nem transmitir.
-- Guardar cada trama recebida tal como o rádio a disponibiliza, além de instante, canal, tamanho, RSSI e LQI.
-- Preservar os bytes da trama para decidir depois quais campos e padrões são úteis. Não tentar descodificar conteúdo de aplicação cifrado.
-- Ao encher o buffer de 128 tramas, parar a captura apenas no C6, ligar o Wi-Fi, enviar o CSV como anexo para ntfy e retomar a captura.
-- Manter a captura em RAM, sem escrita contínua na flash.
-- Não afetar o funcionamento dos dispositivos Zigbee da casa.
+- Ouvir passivamente o canal Zigbee configurado, sem aderir à rede nem transmitir.
+- Manter apenas contadores estatísticos em RAM; não guardar nem anexar o conteúdo das tramas.
+- A cada hora de captura, ligar o Wi-Fi e publicar um resumo em texto normal no ntfy.
+- Depois do envio, desligar o Wi-Fi e iniciar a hora de captura seguinte.
+- Se o envio falhar, manter os contadores e tentar novamente após cinco minutos.
+- Permitir OTA: manter BOOT premido durante três segundos abre uma janela Wi-Fi de dez minutos.
 
-## Ciclo de funcionamento
+## Conteúdo do resumo horário
 
-1. O Wi-Fi fica desligado enquanto o C6 escuta o canal Zigbee 11.
-2. Ao encher o buffer, o C6 pausa a captura e ativa o Wi-Fi.
-3. Envia as tramas e os metadados como um CSV anexo ao ntfy.
-4. Só depois de uma resposta HTTP de sucesso limpa o buffer, desliga o Wi-Fi e retoma a captura.
-5. Se a ligação ou o envio falhar, mantém o bloco em RAM e tenta novamente após cinco minutos.
-6. Para atualizar o firmware, manter o botão BOOT premido por três segundos após o arranque abre uma janela OTA de dez minutos; o Wi-Fi desliga-se no fim e a captura retoma.
+Cada notificação inclui:
+- total de tramas recebidas e classificação MAC básica (beacon, dados, ACK, comando e outros);
+- RSSI e LQI mínimo, médio e máximo;
+- distribuição de RSSI e LQI por intervalos;
+- erros de receção observados pelo driver.
+
+Os intervalos correspondem ao tempo efetivo de captura; a pausa para ligar ao Wi-Fi e publicar o resumo fica fora da medição. O sniffer é passivo e só caracteriza o tráfego que chega ao local onde está instalado. Não mede diretamente entregas, retransmissões ou rotas entre outros dispositivos.
 
 ## Limites técnicos
 
-- O componente Zigbee normal do ESPHome transforma o ESP32 num dispositivo da rede; não é um sniffer passivo. O Snifzig usa um componente externo ESPHome/C++ com a API IEEE 802.15.4.
-- O ESP32-C6 partilha a rádio entre Wi-Fi e 802.15.4. Durante cada envio ntfy, este C6 deixa de ouvir Zigbee por alguns segundos; a rede Zigbee continua ativa.
-- O driver entrega o cabeçalho MAC e o payload MAC sem o FCS; RSSI e LQI são metadados separados. O conteúdo de aplicação Zigbee pode estar cifrado.
-- O buffer atual tem capacidade inicial para 128 tramas. Ao faltar energia ou reiniciar antes do envio, o bloco em RAM perde-se.
-- A placa é a Seeed Studio XIAO ESP32-C6 e o firmware seleciona a antena cerâmica integrada.
-- O LED de utilizador laranja (GPIO15) pisca brevemente durante a captura, fica fixo quando o Wi-Fi liga no modo de manutenção OTA e fica apagado durante o envio ntfy.
-- As credenciais Wi-Fi ficam em `secrets.yaml` local, ignorado pelo Git. O endereço e tópico ntfy devem ser definidos apenas na configuração local do ESPHome.
+- O ESP32-C6 partilha a rádio entre Wi-Fi e 802.15.4. Durante a publicação e a janela OTA, o Snifzig não ouve Zigbee; a rede Zigbee continua a funcionar.
+- A classificação de tipo usa os bits do Frame Control IEEE 802.15.4. Não identifica dispositivos nem interpreta payloads cifrados.
+- O LED laranja (GPIO15) pisca durante a captura e fica aceso continuamente quando o Wi-Fi está ligado na janela OTA.
+- As credenciais Wi-Fi ficam em `secrets.yaml` local. O endereço ntfy deve ser definido apenas na configuração local.
 
-## Estado
+## Compilar e instalar
 
-Existe uma configuração ESPHome com captura, buffer em RAM, alternância Wi-Fi e envio CSV para ntfy. A implementação ainda não foi compilada nem validada na placa.
+A configuração de exemplo está em `snifzig.yaml`. Usar a configuração local com as credenciais e o tópico ntfy próprios.
 
-## Próximo passo
-
-Definir localmente as credenciais Wi-Fi e o endereço/tópico ntfy, compilar e instalar no XIAO, depois observar o primeiro envio. A partir do volume real de dados ajustamos o tamanho do lote e a frequência.
-
-Ver [docs/ROADMAP.md](docs/ROADMAP.md) para as etapas detalhadas.
+Ver [docs/ROADMAP.md](docs/ROADMAP.md) para o estado e próximos passos.
