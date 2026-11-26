@@ -1,9 +1,5 @@
 #include "snifzig_capture.h"
-
-#include <inttypes.h>
 #include <stdio.h>
-#include <string.h>
-
 #include "driver/gpio.h"
 #include "esp_attr.h"
 #include "esp_crt_bundle.h"
@@ -13,529 +9,220 @@
 #include "esphome/components/wifi/wifi_component.h"
 #include "esphome/core/log.h"
 
-namespace esphome {
-namespace snifzig_capture {
-
+namespace esphome { namespace snifzig_capture {
 static const char *const TAG = "snifzig_capture";
 static SnifzigCapture *s_instance = nullptr;
-
-// XIAO ESP32-C6 RF switch. GPIO3 LOW enables antenna selection;
-// GPIO14 LOW selects the onboard ceramic antenna.
 static constexpr gpio_num_t RF_SWITCH_ENABLE_GPIO = GPIO_NUM_3;
 static constexpr gpio_num_t RF_ANTENNA_SELECT_GPIO = GPIO_NUM_14;
-static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 45000;
-static constexpr uint32_t WIFI_SHUTDOWN_TIMEOUT_MS = 10000;
+static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 45000, WIFI_SHUTDOWN_TIMEOUT_MS = 10000;
 static constexpr uint32_t UPLOAD_RETRY_DELAY_MS = 300000;
-static constexpr gpio_num_t STATUS_LED_GPIO = GPIO_NUM_15;
-static constexpr gpio_num_t OTA_BUTTON_GPIO = GPIO_NUM_9;
-static constexpr uint32_t OTA_BUTTON_HOLD_MS = 3000;
-static constexpr uint32_t OTA_MAINTENANCE_WINDOW_MS = 600000;
-static constexpr uint32_t STATUS_LED_PERIOD_MS = 1000;
-static constexpr uint32_t STATUS_LED_PULSE_MS = 120;
-static constexpr uint32_t CSV_HTTP_TIMEOUT_MS = 20000;
+static constexpr gpio_num_t STATUS_LED_GPIO = GPIO_NUM_15, OTA_BUTTON_GPIO = GPIO_NUM_9;
+static constexpr uint32_t OTA_BUTTON_HOLD_MS = 3000, OTA_MAINTENANCE_WINDOW_MS = 600000;
+static constexpr uint32_t STATUS_LED_PERIOD_MS = 1000, STATUS_LED_PULSE_MS = 120;
+static constexpr uint32_t REPORT_HTTP_TIMEOUT_MS = 20000;
 
 void SnifzigCapture::setup() {
   s_instance = this;
-
-  gpio_config_t antenna_config{};
-  antenna_config.pin_bit_mask =
-      (1ULL << RF_SWITCH_ENABLE_GPIO) | (1ULL << RF_ANTENNA_SELECT_GPIO);
-  antenna_config.mode = GPIO_MODE_OUTPUT;
-  antenna_config.pull_up_en = GPIO_PULLUP_DISABLE;
-  antenna_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  antenna_config.intr_type = GPIO_INTR_DISABLE;
-  ESP_ERROR_CHECK(gpio_config(&antenna_config));
+  gpio_config_t cfg{};
+  cfg.pin_bit_mask = (1ULL << RF_SWITCH_ENABLE_GPIO) | (1ULL << RF_ANTENNA_SELECT_GPIO);
+  cfg.mode = GPIO_MODE_OUTPUT;
+  ESP_ERROR_CHECK(gpio_config(&cfg));
   ESP_ERROR_CHECK(gpio_set_level(RF_SWITCH_ENABLE_GPIO, 0));
   ESP_ERROR_CHECK(gpio_set_level(RF_ANTENNA_SELECT_GPIO, 0));
-
-  gpio_config_t status_led_config{};
-  status_led_config.pin_bit_mask = 1ULL << STATUS_LED_GPIO;
-  status_led_config.mode = GPIO_MODE_OUTPUT;
-  status_led_config.pull_up_en = GPIO_PULLUP_DISABLE;
-  status_led_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  status_led_config.intr_type = GPIO_INTR_DISABLE;
-  ESP_ERROR_CHECK(gpio_config(&status_led_config));
-  // The XIAO ESP32-C6 user LED is active-low; start with it off.
-  ESP_ERROR_CHECK(gpio_set_level(STATUS_LED_GPIO, 1));
-
-  gpio_config_t ota_button_config{};
-  ota_button_config.pin_bit_mask = 1ULL << OTA_BUTTON_GPIO;
-  ota_button_config.mode = GPIO_MODE_INPUT;
-  ota_button_config.pull_up_en = GPIO_PULLUP_ENABLE;
-  ota_button_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  ota_button_config.intr_type = GPIO_INTR_DISABLE;
-  ESP_ERROR_CHECK(gpio_config(&ota_button_config));
-
+  cfg = {};
+  cfg.pin_bit_mask = 1ULL << STATUS_LED_GPIO; cfg.mode = GPIO_MODE_OUTPUT;
+  ESP_ERROR_CHECK(gpio_config(&cfg)); ESP_ERROR_CHECK(gpio_set_level(STATUS_LED_GPIO, 1));
+  cfg = {}; cfg.pin_bit_mask = 1ULL << OTA_BUTTON_GPIO; cfg.mode = GPIO_MODE_INPUT;
+  cfg.pull_up_en = GPIO_PULLUP_ENABLE; ESP_ERROR_CHECK(gpio_config(&cfg));
   ESP_ERROR_CHECK(esp_ieee802154_enable());
   ESP_ERROR_CHECK(esp_ieee802154_set_channel(this->channel_));
   ESP_ERROR_CHECK(esp_ieee802154_set_promiscuous(true));
   ESP_ERROR_CHECK(esp_ieee802154_set_coordinator(false));
   ESP_ERROR_CHECK(esp_ieee802154_set_rx_when_idle(true));
   ESP_ERROR_CHECK(esp_ieee802154_receive());
-
-  ESP_LOGI(TAG, "Passive capture started on Zigbee channel %u", this->channel_);
-  ESP_LOGI(TAG, "Wi-Fi stays off during capture; hold BOOT for 3 seconds for OTA maintenance");
-  ESP_LOGI(TAG, "RAM ring capacity: %u frames", CAPTURE_RING_CAPACITY);
+  this->last_report_ms_ = millis();
+  ESP_LOGI(TAG, "Passive Zigbee statistics started on channel %u; hourly text reports", this->channel_);
+  ESP_LOGI(TAG, "Hold BOOT for 3 seconds to open 10-minute OTA window");
 }
 
 void SnifzigCapture::loop() {
   const uint32_t now = millis();
-
-  // Short heartbeat pulse only while the 802.15.4 receiver is capturing.
-  const bool wifi_connected_for_ota = this->state_ == UploadState::OTA_MAINTENANCE &&
-      wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
-  const bool led_should_be_on = wifi_connected_for_ota ||
-      (this->state_ == UploadState::CAPTURING &&
-       (now % STATUS_LED_PERIOD_MS) < STATUS_LED_PULSE_MS);
-  if (led_should_be_on != this->status_led_on_) {
-    gpio_set_level(STATUS_LED_GPIO, led_should_be_on ? 0 : 1);
-    this->status_led_on_ = led_should_be_on;
-  }
+  const bool wifi_ota = this->state_ == UploadState::OTA_MAINTENANCE &&
+      wifi::global_wifi_component && wifi::global_wifi_component->is_connected();
+  const bool led = wifi_ota || (this->state_ == UploadState::CAPTURING && now % STATUS_LED_PERIOD_MS < STATUS_LED_PULSE_MS);
+  if (led != this->status_led_on_) { gpio_set_level(STATUS_LED_GPIO, led ? 0 : 1); this->status_led_on_ = led; }
 
   if (this->state_ == UploadState::CAPTURING) {
-    const bool ota_button_pressed = gpio_get_level(OTA_BUTTON_GPIO) == 0;
-    if (ota_button_pressed) {
-      if (!this->ota_button_held_) {
-        this->ota_button_held_ = true;
-        this->ota_button_started_ms_ = now;
-      } else if (now - this->ota_button_started_ms_ >= OTA_BUTTON_HOLD_MS) {
-        this->ota_button_held_ = false;
-        this->begin_ota_maintenance_();
-        return;
+    const bool pressed = gpio_get_level(OTA_BUTTON_GPIO) == 0;
+    if (pressed) {
+      if (!this->ota_button_held_) { this->ota_button_held_ = true; this->ota_button_started_ms_ = now; }
+      else if (now - this->ota_button_started_ms_ >= OTA_BUTTON_HOLD_MS) {
+        this->ota_button_held_ = false; this->begin_ota_maintenance_(); return;
       }
-    } else {
-      this->ota_button_held_ = false;
-    }
-
-    // Let a deliberate long press enter OTA mode even if the capture buffer fills.
-    if (!ota_button_pressed && this->get_stats().records_in_buffer >= CAPTURE_RING_CAPACITY) {
-      this->begin_upload_();
-    }
-
-    if (now - this->last_report_ms_ >= 30000) {
-      this->last_report_ms_ = now;
-      const CaptureStats stats = this->get_stats();
-      ESP_LOGI(TAG,
-               "frames=%u buffered=%u/%u overwritten=%u invalid=%u release_errors=%u restart_errors=%u",
-               static_cast<unsigned>(stats.frames_received),
-               static_cast<unsigned>(stats.records_in_buffer),
-               static_cast<unsigned>(CAPTURE_RING_CAPACITY),
-               static_cast<unsigned>(stats.records_overwritten),
-               static_cast<unsigned>(stats.invalid_frames),
-               static_cast<unsigned>(stats.rx_release_errors),
-               static_cast<unsigned>(stats.rx_restart_errors));
-    }
+    } else this->ota_button_held_ = false;
+    if (now - this->last_report_ms_ >= STATS_INTERVAL_MS) this->begin_upload_();
     return;
   }
-
   if (this->state_ == UploadState::OTA_MAINTENANCE) {
-    const bool connected = wifi::global_wifi_component != nullptr &&
-                           wifi::global_wifi_component->is_connected();
-    const bool window_expired = now - this->state_started_ms_ >= OTA_MAINTENANCE_WINDOW_MS;
-    const bool connection_timed_out = !connected &&
-        now - this->state_started_ms_ >= WIFI_CONNECT_TIMEOUT_MS;
-    if (window_expired || connection_timed_out) {
-      ESP_LOGI(TAG, window_expired ? "OTA maintenance window ended" :
-               "Wi-Fi connection timed out during OTA maintenance");
-      this->end_ota_maintenance_();
+    const bool connected = wifi::global_wifi_component && wifi::global_wifi_component->is_connected();
+    const bool expired = now - this->state_started_ms_ >= OTA_MAINTENANCE_WINDOW_MS;
+    if (expired || (!connected && now - this->state_started_ms_ >= WIFI_CONNECT_TIMEOUT_MS)) {
+      ESP_LOGI(TAG, "OTA window ended or Wi-Fi connection timed out"); this->end_ota_maintenance_();
     }
     return;
   }
-
   if (this->state_ == UploadState::OTA_WIFI_OFF) {
-    const bool wifi_is_off = wifi::global_wifi_component == nullptr ||
-                              wifi::global_wifi_component->is_disabled();
-    if (wifi_is_off) {
-      this->upload_succeeded_ = false;
-      this->resume_capture_();
-      return;
+    if (!wifi::global_wifi_component || wifi::global_wifi_component->is_disabled()) {
+      this->upload_succeeded_ = false; this->resume_capture_(); return;
     }
     if (now - this->state_started_ms_ >= WIFI_SHUTDOWN_TIMEOUT_MS) {
-      if (wifi::global_wifi_component != nullptr) {
-        wifi::global_wifi_component->disable();
-      }
-      this->state_started_ms_ = now;
+      wifi::global_wifi_component->disable(); this->state_started_ms_ = now;
     }
     return;
   }
-
   if (this->state_ == UploadState::WAITING_FOR_WIFI) {
-    if (wifi::global_wifi_component == nullptr) {
-      ESP_LOGE(TAG, "ESPHome Wi-Fi component is unavailable; retaining batch");
-      this->finish_upload_(false);
-      return;
-    }
-
-    if (wifi::global_wifi_component->is_connected()) {
-      const bool success = this->send_csv_();
-      this->finish_upload_(success);
-      return;
-    }
-
-    if (now - this->state_started_ms_ >= WIFI_CONNECT_TIMEOUT_MS) {
-      ESP_LOGW(TAG, "Wi-Fi connection timed out; retaining batch for retry");
-      this->finish_upload_(false);
-    }
+    if (!wifi::global_wifi_component) this->finish_upload_(false);
+    else if (wifi::global_wifi_component->is_connected()) this->finish_upload_(this->send_report_());
+    else if (now - this->state_started_ms_ >= WIFI_CONNECT_TIMEOUT_MS) this->finish_upload_(false);
     return;
   }
-
   if (this->state_ == UploadState::WAITING_FOR_WIFI_OFF) {
-    const bool wifi_is_off =
-        wifi::global_wifi_component == nullptr || wifi::global_wifi_component->is_disabled();
-
-    if (wifi_is_off) {
+    if (!wifi::global_wifi_component || wifi::global_wifi_component->is_disabled()) {
       if (this->upload_succeeded_) {
-        this->resume_capture_();
+        this->clear_stats_(); this->report_number_++; this->resume_capture_();
       } else {
-        this->retry_due_ms_ = now + UPLOAD_RETRY_DELAY_MS;
-        this->state_ = UploadState::RETRY_WAIT;
-        ESP_LOGI(TAG, "Pending batch retained; next ntfy attempt in 5 minutes");
+        this->retry_due_ms_ = now + UPLOAD_RETRY_DELAY_MS; this->state_ = UploadState::RETRY_WAIT;
+        ESP_LOGW(TAG, "Summary retained; retry in 5 minutes");
       }
-      return;
-    }
-
-    if (now - this->state_started_ms_ >= WIFI_SHUTDOWN_TIMEOUT_MS) {
-      ESP_LOGW(TAG, "Wi-Fi has not reported disabled yet; requesting shutdown again");
-      if (wifi::global_wifi_component != nullptr) {
-        wifi::global_wifi_component->disable();
-      }
-      this->state_started_ms_ = now;
+    } else if (now - this->state_started_ms_ >= WIFI_SHUTDOWN_TIMEOUT_MS) {
+      wifi::global_wifi_component->disable(); this->state_started_ms_ = now;
     }
     return;
   }
-
-  if (this->state_ == UploadState::RETRY_WAIT &&
-      static_cast<int32_t>(now - this->retry_due_ms_) >= 0) {
+  if (this->state_ == UploadState::RETRY_WAIT && static_cast<int32_t>(now - this->retry_due_ms_) >= 0)
     this->begin_upload_();
-  }
 }
 
 void SnifzigCapture::begin_ota_maintenance_() {
-  if (wifi::global_wifi_component == nullptr) {
-    ESP_LOGE(TAG, "Cannot start OTA maintenance: ESPHome Wi-Fi component is unavailable");
-    return;
-  }
-
-  const esp_err_t sleep_result = esp_ieee802154_sleep();
-  if (sleep_result != ESP_OK) {
-    ESP_LOGW(TAG, "Could not put 802.15.4 radio to sleep for OTA: %s",
-             esp_err_to_name(sleep_result));
-  }
-
-  this->upload_succeeded_ = false;
-  this->state_started_ms_ = millis();
+  if (!wifi::global_wifi_component) return;
+  const esp_err_t e = esp_ieee802154_sleep();
+  if (e != ESP_OK) ESP_LOGW(TAG, "802.15.4 sleep for OTA: %s", esp_err_to_name(e));
+  this->upload_succeeded_ = false; this->state_started_ms_ = millis();
   this->state_ = UploadState::OTA_MAINTENANCE;
-  gpio_set_level(STATUS_LED_GPIO, 1);
-  this->status_led_on_ = false;
-  wifi::global_wifi_component->enable();
-  ESP_LOGI(TAG, "OTA maintenance started for 10 minutes; Wi-Fi enabled");
+  gpio_set_level(STATUS_LED_GPIO, 1); this->status_led_on_ = false;
+  wifi::global_wifi_component->enable(); ESP_LOGI(TAG, "OTA Wi-Fi enabled");
 }
-
 void SnifzigCapture::end_ota_maintenance_() {
-  this->state_started_ms_ = millis();
-  this->state_ = UploadState::OTA_WIFI_OFF;
-  if (wifi::global_wifi_component != nullptr) {
-    wifi::global_wifi_component->disable();
-  }
+  this->state_started_ms_ = millis(); this->state_ = UploadState::OTA_WIFI_OFF;
+  if (wifi::global_wifi_component) wifi::global_wifi_component->disable();
 }
-
 void SnifzigCapture::begin_upload_() {
-  if (wifi::global_wifi_component == nullptr) {
-    ESP_LOGE(TAG, "Cannot upload: ESPHome Wi-Fi component is unavailable");
-    this->upload_succeeded_ = false;
-    this->retry_due_ms_ = millis() + UPLOAD_RETRY_DELAY_MS;
-    this->state_ = UploadState::RETRY_WAIT;
-    return;
+  if (!wifi::global_wifi_component) {
+    this->retry_due_ms_ = millis() + UPLOAD_RETRY_DELAY_MS; this->state_ = UploadState::RETRY_WAIT; return;
   }
-
-  // The RX callback has stopped re-arming the 802.15.4 radio when the ring fills.
-  // Put the radio fully to sleep before enabling Wi-Fi on the shared RF hardware.
-  const esp_err_t sleep_result = esp_ieee802154_sleep();
-  if (sleep_result != ESP_OK) {
-    ESP_LOGW(TAG, "Could not put 802.15.4 radio to sleep: %s", esp_err_to_name(sleep_result));
-  }
-
-  this->upload_succeeded_ = false;
-  this->state_started_ms_ = millis();
-  this->state_ = UploadState::WAITING_FOR_WIFI;
-  gpio_set_level(STATUS_LED_GPIO, 1);
-  this->status_led_on_ = false;
-  wifi::global_wifi_component->enable();
-  ESP_LOGI(TAG, "Capture batch ready; enabling Wi-Fi for ntfy upload");
+  const esp_err_t e = esp_ieee802154_sleep();
+  if (e != ESP_OK) ESP_LOGW(TAG, "802.15.4 sleep before report: %s", esp_err_to_name(e));
+  this->upload_succeeded_ = false; this->state_started_ms_ = millis(); this->state_ = UploadState::WAITING_FOR_WIFI;
+  gpio_set_level(STATUS_LED_GPIO, 1); this->status_led_on_ = false;
+  wifi::global_wifi_component->enable(); ESP_LOGI(TAG, "Hourly statistics ready; enabling Wi-Fi");
 }
-
 void SnifzigCapture::finish_upload_(bool success) {
   this->upload_succeeded_ = success;
-  if (success) {
-    ESP_LOGI(TAG, "ntfy accepted batch %u", static_cast<unsigned>(this->batch_number_));
-  } else {
-    ESP_LOGW(TAG, "ntfy upload failed; keeping batch in RAM");
-  }
-
-  this->state_started_ms_ = millis();
-  this->state_ = UploadState::WAITING_FOR_WIFI_OFF;
-  if (wifi::global_wifi_component != nullptr) {
-    wifi::global_wifi_component->disable();
-  }
+  ESP_LOGI(TAG, success ? "ntfy accepted hourly text summary" : "ntfy failed; retaining hourly statistics");
+  this->state_started_ms_ = millis(); this->state_ = UploadState::WAITING_FOR_WIFI_OFF;
+  if (wifi::global_wifi_component) wifi::global_wifi_component->disable();
 }
-
 void SnifzigCapture::resume_capture_() {
-  if (this->upload_succeeded_) {
-    portENTER_CRITICAL(&this->mux_);
-    this->head_ = 0;
-    this->count_ = 0;
-    portEXIT_CRITICAL(&this->mux_);
-    this->batch_number_++;
+  const esp_err_t e = esp_ieee802154_receive();
+  if (e != ESP_OK) {
+    ESP_LOGE(TAG, "Could not resume capture: %s", esp_err_to_name(e));
+    this->retry_due_ms_ = millis() + UPLOAD_RETRY_DELAY_MS; this->state_ = UploadState::RETRY_WAIT; return;
   }
-
-  const esp_err_t receive_result = esp_ieee802154_receive();
-  if (receive_result != ESP_OK) {
-    ESP_LOGE(TAG, "Could not resume channel %u capture: %s",
-             this->channel_, esp_err_to_name(receive_result));
-    this->retry_due_ms_ = millis() + UPLOAD_RETRY_DELAY_MS;
-    this->state_ = UploadState::RETRY_WAIT;
-    return;
-  }
-
-  this->state_ = UploadState::CAPTURING;
-  this->last_report_ms_ = millis();
-  ESP_LOGI(TAG, "Wi-Fi is off; Zigbee capture resumed on channel %u", this->channel_);
+  this->state_ = UploadState::CAPTURING; this->last_report_ms_ = millis();
+  ESP_LOGI(TAG, "Wi-Fi off; capture resumed on channel %u", this->channel_);
 }
-
-bool SnifzigCapture::build_csv_(size_t *csv_size) {
-  if (csv_size == nullptr) {
-    return false;
-  }
-
-  size_t used = 0;
-  int written = snprintf(this->csv_buffer_, sizeof(this->csv_buffer_),
-                         "sequence,sfd_timestamp,channel,rssi_dbm,lqi,length,frame_hex\n");
-  if (written < 0 || static_cast<size_t>(written) >= sizeof(this->csv_buffer_)) {
-    return false;
-  }
-  used = static_cast<size_t>(written);
-
-  static const char HEX[] = "0123456789ABCDEF";
-  const CaptureStats stats = this->get_stats();
-
-  for (uint16_t index = 0; index < stats.records_in_buffer; index++) {
-    CaptureRecord record{};
-    if (!this->copy_record(index, &record)) {
-      return false;
-    }
-
-    written = snprintf(this->csv_buffer_ + used, sizeof(this->csv_buffer_) - used,
-                       "%" PRIu32 ",%" PRIu64 ",%u,%d,%u,%u,",
-                       record.sequence,
-                       record.sfd_timestamp,
-                       record.channel,
-                       record.rssi_dbm,
-                       record.lqi,
-                       record.length);
-    if (written < 0 || static_cast<size_t>(written) >= sizeof(this->csv_buffer_) - used) {
-      return false;
-    }
-    used += static_cast<size_t>(written);
-
-    const size_t hex_size = static_cast<size_t>(record.length) * 2;
-    if (hex_size + 1 >= sizeof(this->csv_buffer_) - used) {
-      return false;
-    }
-    for (uint8_t byte_index = 0; byte_index < record.length; byte_index++) {
-      const uint8_t value = record.bytes[byte_index];
-      this->csv_buffer_[used++] = HEX[value >> 4];
-      this->csv_buffer_[used++] = HEX[value & 0x0F];
-    }
-    this->csv_buffer_[used++] = '\n';
-  }
-
-  *csv_size = used;
-  return true;
-}
-
-bool SnifzigCapture::send_csv_() {
-  size_t csv_size = 0;
-  if (!this->build_csv_(&csv_size) || csv_size == 0) {
-    ESP_LOGE(TAG, "Could not serialize capture batch");
-    return false;
-  }
-
-  char filename[40];
-  char title[80];
-  snprintf(filename, sizeof(filename), "snifzig_%06" PRIu32 ".csv", this->batch_number_);
-  snprintf(title, sizeof(title), "Snifzig Zigbee capture, channel %u", this->channel_);
-
-  esp_http_client_config_t config{};
-  config.url = this->ntfy_publish_url_.c_str();
-  config.method = HTTP_METHOD_PUT;
-  config.timeout_ms = CSV_HTTP_TIMEOUT_MS;
-  config.crt_bundle_attach = esp_crt_bundle_attach;
-
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (client == nullptr) {
-    ESP_LOGE(TAG, "Could not create ntfy HTTP client");
-    return false;
-  }
-
-  esp_err_t result = esp_http_client_set_header(client, "Content-Type", "text/csv");
-  if (result == ESP_OK) {
-    result = esp_http_client_set_header(client, "X-Filename", filename);
-  }
-  if (result == ESP_OK) {
-    result = esp_http_client_set_header(client, "Title", title);
-  }
-  if (result == ESP_OK && !this->ntfy_authorization_.empty()) {
-    result = esp_http_client_set_header(client, "Authorization",
-                                        this->ntfy_authorization_.c_str());
-  }
-  if (result != ESP_OK) {
-    ESP_LOGE(TAG, "Could not configure ntfy request headers: %s", esp_err_to_name(result));
-    esp_http_client_cleanup(client);
-    return false;
-  }
-
-  result = esp_http_client_open(client, static_cast<int>(csv_size));
-  if (result != ESP_OK) {
-    ESP_LOGE(TAG, "Could not open ntfy upload: %s", esp_err_to_name(result));
-    esp_http_client_cleanup(client);
-    return false;
-  }
-
-  size_t offset = 0;
-  while (offset < csv_size) {
-    const int chunk = esp_http_client_write(
-        client,
-        this->csv_buffer_ + offset,
-        static_cast<int>(csv_size - offset));
-    if (chunk <= 0) {
-      ESP_LOGE(TAG, "ntfy upload stopped after %u/%u bytes",
-               static_cast<unsigned>(offset),
-               static_cast<unsigned>(csv_size));
-      esp_http_client_close(client);
-      esp_http_client_cleanup(client);
-      return false;
-    }
-    offset += static_cast<size_t>(chunk);
-  }
-
-  esp_http_client_fetch_headers(client);
-  const int status_code = esp_http_client_get_status_code(client);
-  esp_http_client_close(client);
-  esp_http_client_cleanup(client);
-
-  if (status_code < 200 || status_code >= 300) {
-    ESP_LOGW(TAG, "ntfy returned HTTP %d; retaining capture batch", status_code);
-    return false;
-  }
-
-  ESP_LOGI(TAG, "Uploaded %u frames (%u bytes) as %s",
-           static_cast<unsigned>(this->get_stats().records_in_buffer),
-           static_cast<unsigned>(csv_size),
-           filename);
-  return true;
-}
-
-bool SnifzigCapture::copy_record(uint16_t index, CaptureRecord *out) const {
-  if (out == nullptr) {
-    return false;
-  }
-
-  bool copied = false;
-  portENTER_CRITICAL(&this->mux_);
-  if (index < this->count_) {
-    const uint16_t oldest =
-        (this->head_ + CAPTURE_RING_CAPACITY - this->count_) % CAPTURE_RING_CAPACITY;
-    const uint16_t slot = (oldest + index) % CAPTURE_RING_CAPACITY;
-    *out = this->ring_[slot];
-    copied = true;
-  }
-  portEXIT_CRITICAL(&this->mux_);
-  return copied;
-}
-
 CaptureStats SnifzigCapture::get_stats() const {
-  CaptureStats stats{};
+  CaptureStats s{};
   portENTER_CRITICAL(&this->mux_);
-  stats.frames_received = this->frames_received_;
-  stats.records_overwritten = this->records_overwritten_;
-  stats.invalid_frames = this->invalid_frames_;
-  stats.rx_release_errors = this->rx_release_errors_;
-  stats.rx_restart_errors = this->rx_restart_errors_;
-  stats.records_in_buffer = this->count_;
+  s.frames_received=this->frames_received_; s.invalid_frames=this->invalid_frames_;
+  s.rx_release_errors=this->rx_release_errors_; s.rx_restart_errors=this->rx_restart_errors_;
+  for (uint8_t i=0;i<5;i++) s.frame_types[i]=this->frame_types_[i];
+  for (uint8_t i=0;i<4;i++) { s.rssi_buckets[i]=this->rssi_buckets_[i]; s.lqi_buckets[i]=this->lqi_buckets_[i]; }
+  s.rssi_sum=this->rssi_sum_; s.lqi_sum=this->lqi_sum_;
+  s.rssi_min=this->rssi_min_; s.rssi_max=this->rssi_max_; s.lqi_min=this->lqi_min_; s.lqi_max=this->lqi_max_;
+  portEXIT_CRITICAL(&this->mux_); return s;
+}
+void SnifzigCapture::clear_stats_() {
+  portENTER_CRITICAL(&this->mux_);
+  this->frames_received_=this->invalid_frames_=this->rx_release_errors_=this->rx_restart_errors_=0;
+  this->rssi_sum_=0; this->lqi_sum_=0; this->rssi_min_=127; this->rssi_max_=-128; this->lqi_min_=255; this->lqi_max_=0;
+  for (uint8_t i=0;i<5;i++) this->frame_types_[i]=0;
+  for (uint8_t i=0;i<4;i++) this->rssi_buckets_[i]=this->lqi_buckets_[i]=0;
   portEXIT_CRITICAL(&this->mux_);
-  return stats;
 }
-
-void IRAM_ATTR SnifzigCapture::handle_frame(
-    uint8_t *frame,
-    esp_ieee802154_frame_info_t *frame_info) {
-  const bool valid = frame != nullptr && frame_info != nullptr;
-  const uint8_t length = valid ? frame[0] : 0;
-  bool rearm_receiver = true;
-
-  if (!valid || length > MAX_MAC_FRAME_LENGTH) {
-    portENTER_CRITICAL_ISR(&this->mux_);
-    this->invalid_frames_++;
-    portEXIT_CRITICAL_ISR(&this->mux_);
-  } else {
-    portENTER_CRITICAL_ISR(&this->mux_);
-
-    CaptureRecord &record = this->ring_[this->head_];
-    record.sequence = this->frames_received_;
-    record.sfd_timestamp = frame_info->timestamp;
-    record.rssi_dbm = frame_info->rssi;
-    record.lqi = frame_info->lqi;
-    record.channel = frame_info->channel;
-    record.length = length;
-
-    // frame[0] is the length. Keep the MAC header and payload bytes as
-    // delivered by the radio; RSSI/LQI are separate receive metadata.
-    for (uint8_t i = 0; i < length; i++) {
-      record.bytes[i] = frame[i + 1];
-    }
-
-    this->head_ = (this->head_ + 1) % CAPTURE_RING_CAPACITY;
-    if (this->count_ < CAPTURE_RING_CAPACITY) {
-      this->count_++;
-    } else {
-      this->records_overwritten_++;
-    }
-    this->frames_received_++;
-    rearm_receiver = this->count_ < CAPTURE_RING_CAPACITY;
-
-    portEXIT_CRITICAL_ISR(&this->mux_);
-  }
-
-  if (frame != nullptr && esp_ieee802154_receive_handle_done(frame) != ESP_OK) {
-    portENTER_CRITICAL_ISR(&this->mux_);
-    this->rx_release_errors_++;
-    portEXIT_CRITICAL_ISR(&this->mux_);
-  }
-  if (rearm_receiver && esp_ieee802154_receive() != ESP_OK) {
-    portENTER_CRITICAL_ISR(&this->mux_);
-    this->rx_restart_errors_++;
-    portEXIT_CRITICAL_ISR(&this->mux_);
-  }
+bool SnifzigCapture::send_report_() {
+  const CaptureStats s=this->get_stats(); const uint32_t total=s.frames_received;
+  const float ra=total ? (float)s.rssi_sum/total : 0, la=total ? (float)s.lqi_sum/total : 0;
+  char body[768];
+  const int n=snprintf(body,sizeof(body),
+    "Snifzig - resumo horario Zigbee\nCanal: %u | periodo: 60 min\nTramas recebidas: %lu\n"
+    "Tipos MAC: beacon %lu | dados %lu | ACK %lu | comando %lu | outros %lu\n"
+    "RSSI dBm: min %d | media %.1f | max %d\nRSSI: <=-90 %lu | -89..-80 %lu | -79..-70 %lu | >=-69 %lu\n"
+    "LQI: min %u | media %.1f | max %u\nLQI: <8 %lu | 8..9 %lu | 10..11 %lu | >=12 %lu\n"
+    "Erros RX: frames invalidos %lu | libertacao %lu | reinicio %lu\n"
+    "Medicao passiva neste local; nao confirma entrega nem rotas.",
+    this->channel_,(unsigned long)total,(unsigned long)s.frame_types[0],(unsigned long)s.frame_types[1],
+    (unsigned long)s.frame_types[2],(unsigned long)s.frame_types[3],(unsigned long)s.frame_types[4],
+    total?s.rssi_min:0,ra,total?s.rssi_max:0,(unsigned long)s.rssi_buckets[0],(unsigned long)s.rssi_buckets[1],
+    (unsigned long)s.rssi_buckets[2],(unsigned long)s.rssi_buckets[3],
+    total?s.lqi_min:0,la,total?s.lqi_max:0,(unsigned long)s.lqi_buckets[0],(unsigned long)s.lqi_buckets[1],
+    (unsigned long)s.lqi_buckets[2],(unsigned long)s.lqi_buckets[3],(unsigned long)s.invalid_frames,
+    (unsigned long)s.rx_release_errors,(unsigned long)s.rx_restart_errors);
+  if(n<=0 || (size_t)n>=sizeof(body)) return false;
+  char title[72]; snprintf(title,sizeof(title),"Snifzig resumo horario #%lu",(unsigned long)this->report_number_);
+  esp_http_client_config_t cfg{}; cfg.url=this->ntfy_publish_url_.c_str(); cfg.method=HTTP_METHOD_POST;
+  cfg.timeout_ms=REPORT_HTTP_TIMEOUT_MS; cfg.crt_bundle_attach=esp_crt_bundle_attach;
+  esp_http_client_handle_t c=esp_http_client_init(&cfg); if(!c) return false;
+  esp_err_t e=esp_http_client_set_header(c,"Content-Type","text/plain; charset=utf-8");
+  if(e==ESP_OK) e=esp_http_client_set_header(c,"Title",title);
+  if(e==ESP_OK && !this->ntfy_authorization_.empty())
+    e=esp_http_client_set_header(c,"Authorization",this->ntfy_authorization_.c_str());
+  if(e==ESP_OK) e=esp_http_client_open(c,n);
+  if(e==ESP_OK && esp_http_client_write(c,body,n)!=n) e=ESP_FAIL;
+  if(e!=ESP_OK) { esp_http_client_close(c); esp_http_client_cleanup(c); return false; }
+  esp_http_client_fetch_headers(c); const int status=esp_http_client_get_status_code(c);
+  esp_http_client_close(c); esp_http_client_cleanup(c);
+  if(status<200 || status>=300) { ESP_LOGW(TAG,"ntfy HTTP %d",status); return false; }
+  ESP_LOGI(TAG,"Sent hourly summary for %u frames",(unsigned)total); return true;
 }
-
-static void IRAM_ATTR dispatch_received_frame(
-    uint8_t *frame,
-    esp_ieee802154_frame_info_t *frame_info) {
-  if (s_instance != nullptr) {
-    s_instance->handle_frame(frame, frame_info);
-  } else {
-    if (frame != nullptr) {
-      esp_ieee802154_receive_handle_done(frame);
-    }
-    esp_ieee802154_receive();
+void IRAM_ATTR SnifzigCapture::handle_frame(uint8_t *frame, esp_ieee802154_frame_info_t *info) {
+  const bool valid=frame && info; const uint8_t len=valid?frame[0]:0;
+  portENTER_CRITICAL_ISR(&this->mux_);
+  if(!valid || len==0 || len>127) this->invalid_frames_++;
+  else {
+    this->frames_received_++; const int8_t r=info->rssi; const uint8_t q=info->lqi;
+    this->rssi_sum_+=r; this->lqi_sum_+=q;
+    if(r<this->rssi_min_) this->rssi_min_=r; if(r>this->rssi_max_) this->rssi_max_=r;
+    if(q<this->lqi_min_) this->lqi_min_=q; if(q>this->lqi_max_) this->lqi_max_=q;
+    if(r<=-90) this->rssi_buckets_[0]++; else if(r<=-80) this->rssi_buckets_[1]++;
+    else if(r<=-70) this->rssi_buckets_[2]++; else this->rssi_buckets_[3]++;
+    if(q<8) this->lqi_buckets_[0]++; else if(q<10) this->lqi_buckets_[1]++;
+    else if(q<12) this->lqi_buckets_[2]++; else this->lqi_buckets_[3]++;
+    const uint8_t t=len>=2?(frame[1]&7):4; this->frame_types_[t<=3?t:4]++;
+  }
+  portEXIT_CRITICAL_ISR(&this->mux_);
+  if(frame && esp_ieee802154_receive_handle_done(frame)!=ESP_OK) {
+    portENTER_CRITICAL_ISR(&this->mux_); this->rx_release_errors_++; portEXIT_CRITICAL_ISR(&this->mux_);
+  }
+  if(this->state_==UploadState::CAPTURING && esp_ieee802154_receive()!=ESP_OK) {
+    portENTER_CRITICAL_ISR(&this->mux_); this->rx_restart_errors_++; portEXIT_CRITICAL_ISR(&this->mux_);
   }
 }
-
-}  // namespace snifzig_capture
-}  // namespace esphome
-
-extern "C" void IRAM_ATTR esp_ieee802154_receive_done(
-    uint8_t *frame,
-    esp_ieee802154_frame_info_t *frame_info) {
-  esphome::snifzig_capture::dispatch_received_frame(frame, frame_info);
+static void IRAM_ATTR dispatch_received_frame(uint8_t *frame,esp_ieee802154_frame_info_t *info) {
+  if(s_instance) s_instance->handle_frame(frame,info);
+  else { if(frame) esp_ieee802154_receive_handle_done(frame); esp_ieee802154_receive(); }
+}
+} }
+extern "C" void IRAM_ATTR esp_ieee802154_receive_done(uint8_t *frame,esp_ieee802154_frame_info_t *info) {
+  esphome::snifzig_capture::dispatch_received_frame(frame,info);
 }
