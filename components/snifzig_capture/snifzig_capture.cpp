@@ -227,7 +227,7 @@ bool SnifzigCapture::send_report_() {
   const float global_score=groups?((float)rssi_global+lqi_global)/2.0f:0;
   n=snprintf(body+used,sizeof(body)-used,
     "\nDispositivos identificados: %u | grupos considerados na media: %u (cada um com peso igual)\n"
-    "RSSI - %s | LQI - %s | Global - %s\n"
+    "RSSI medio por grupo: %.1f dBm - %s | LQI medio por grupo: %.1f - %s | Global - %s\n"
     "RSSI total: min %d | media %.1f | max %d\nLQI total: min %u | media %.1f | max %u\n"
     "Erros RX: invalidos %lu | libertacao %lu | reinicio %lu\n"
     "Nota: observacao passiva local; nao confirma entrega nem rotas.",
