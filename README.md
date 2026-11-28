@@ -1,36 +1,32 @@
 # snifzig
 
-Projeto experimental para observar indicadores da rede Zigbee 802.15.4 com um Seeed Studio XIAO ESP32-C6, em modo passivo.
+Sniffer Zigbee passivo para Seeed Studio XIAO ESP32-C6, baseado em ESPHome.
 
-## Objetivo e recolha
+## Funcionamento
 
-- Ouvir passivamente o canal Zigbee configurado, sem aderir à rede nem transmitir.
-- Manter apenas contadores estatísticos em RAM; não guardar nem anexar o conteúdo das tramas.
-- A cada hora de captura, ligar o Wi-Fi e publicar um resumo em texto normal no ntfy.
-- Depois do envio, desligar o Wi-Fi e iniciar a hora de captura seguinte.
-- Se o envio falhar, manter os contadores e tentar novamente após cinco minutos.
-- Permitir OTA: manter BOOT premido durante três segundos abre uma janela Wi-Fi de dez minutos.
+- No arranque, tenta ligar ao Wi-Fi configurado no YAML.
+- Se não conseguir, após 30 segundos abre o ponto de acesso aberto **Snifzig** com portal cativo para introduzir uma rede Wi-Fi.
+- Quando a ligação à estação Wi-Fi é confirmada, o firmware desliga a rádio Wi-Fi e inicia a escuta Zigbee no canal configurado. O LED pisca três vezes rapidamente enquanto aguarda Wi-Fi e uma vez por segundo durante a captura.
+- Ao fim de cada hora efetiva de captura, envia um relatório em texto ao ntfy e retoma a escuta.
+- Um toque no botão BOOT pausa a captura e abre uma janela OTA de 10 minutos. No fim, o Wi-Fi desliga-se e a captura Zigbee retoma.
+- As estatísticas são mantidas em RAM; não são guardados nem enviados payloads completos.
 
-## Conteúdo do resumo horário
+## Estatísticas por dispositivo
 
-Cada notificação inclui:
-- total de tramas recebidas e classificação MAC básica (beacon, dados, ACK, comando e outros);
-- RSSI e LQI mínimo, médio e máximo;
-- distribuição de RSSI e LQI por intervalos;
-- erros de receção observados pelo driver;\n- classificações locais de RSSI, LQI e global (fraca, razoável, boa ou excelente), calculadas por faixas indicativas.
+O firmware tenta extrair o endereço de origem dos cabeçalhos MAC Zigbee comuns (IEEE 802.15.4 versões 2003/2006) e calcula por endereço:
+- número de tramas;
+- RSSI médio;
+- LQI médio;
+- classificações indicativas.
 
-Os intervalos correspondem ao tempo efetivo de captura; a pausa para ligar ao Wi-Fi e publicar o resumo fica fora da medição. O sniffer é passivo e só caracteriza o tráfego que chega ao local onde está instalado. Não mede diretamente entregas, retransmissões ou rotas entre outros dispositivos.
+Tramas ACK, tramas sem endereço de origem, formatos que o parser não reconhece e dispositivos além do limite de 64 endereços são agregados num único grupo “não identificadas”. A média global dá o mesmo peso a cada endereço identificado e a esse grupo único, independentemente do número de tramas. O relatório também apresenta o total de tramas, erros do recetor e médias brutas para comparação.
 
-## Limites técnicos
+## Limites da interpretação
 
-- O ESP32-C6 partilha a rádio entre Wi-Fi e 802.15.4. Durante a publicação e a janela OTA, o Snifzig não ouve Zigbee; a rede Zigbee continua a funcionar.
-- A classificação de tipo usa os bits do Frame Control IEEE 802.15.4. Não identifica dispositivos nem interpreta payloads cifrados.
-- O LED laranja (GPIO15) pisca durante a captura e fica aceso continuamente quando o Wi-Fi está ligado na janela OTA.
-- As credenciais Wi-Fi ficam em `secrets.yaml` local. O endereço ntfy deve ser definido apenas na configuração local.
+A classificação descreve os sinais recebidos no local do Snifzig, não a qualidade de todas as ligações da malha. O ponto de acesso e a estação Wi-Fi usam credenciais da configuração ESPHome; o portal é aberto apenas durante o modo de provisionamento. O captive portal guarda as credenciais introduzidas, mas uma compilação/instalação por USB com outras credenciais YAML pode substituí-las.
 
-## Compilar e instalar
+O LQI é um valor de 8 bits fornecido pelo driver, mas as faixas usadas para classificar “fraco/razoável/bom/excelente” são indicativas e devem ser avaliadas com os dados reais. RSSI e LQI não comprovam entrega de pacotes nem rotas.
 
-A configuração de exemplo está em `snifzig.yaml`. Usar a configuração local com as credenciais e o tópico ntfy próprios.
+## Configuração
 
-Ver [docs/ROADMAP.md](docs/ROADMAP.md) para o estado e próximos passos.
-\nAs faixas LQI são subdivisões indicativas do intervalo de 8 bits (0–255), não limiares universais de qualidade da malha. A classificação global dá peso igual ao RSSI e ao LQI e descreve apenas a receção no local do Snifzig.\n
+A configuração de exemplo é `snifzig.yaml`. Define localmente as credenciais Wi-Fi e o URL/tópico ntfy; não coloques credenciais ou o endpoint pessoal no repositório.
