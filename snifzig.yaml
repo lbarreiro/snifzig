@@ -32,9 +32,13 @@ esp32:
 wifi:
   ssid: !secret snifzig_wifi_ssid
   password: !secret snifzig_wifi_password
-  enable_on_boot: false
   reboot_timeout: 0s
+  ap_timeout: 30s
+  ap:
+    ssid: "Snifzig"
   power_save_mode: none
+
+captive_portal:
 
 logger:
   level: INFO
