@@ -192,7 +192,7 @@ void SnifzigCapture::clear_stats_() {
 bool SnifzigCapture::send_report_() {
   const CaptureStats s=this->get_stats();
   float rssi_group_sum=0,lqi_group_sum=0; uint8_t groups=0;
-  char body[10000]; size_t used=0;
+  static char body[10000]; size_t used=0;
   int n=snprintf(body,sizeof(body),
     "Snifzig - resumo horario Zigbee\nCanal: %u | periodo de captura: 60 min\n"
     "Tramas recebidas: %lu | identificadas: %lu | nao identificadas: %lu\n"
