@@ -25,6 +25,12 @@ static const char *grade(uint8_t value) {
   if(value==2) return "razoavel";
   return "fraco";
 }
+static const char *grade_score(float score) {
+  if(score>=3.5f) return "excelente";
+  if(score>=2.75f) return "bom";
+  if(score>=2.0f) return "razoavel";
+  return "fraco";
+}
 static uint8_t rssi_grade(float v) {
   if(v<=-90) return 1;
   if(v<=-80) return 2;
@@ -185,7 +191,7 @@ void SnifzigCapture::clear_stats_() {
 }
 bool SnifzigCapture::send_report_() {
   const CaptureStats s=this->get_stats();
-  uint8_t rssi_score_sum=0,lqi_score_sum=0,groups=0;
+  float rssi_group_sum=0,lqi_group_sum=0; uint8_t groups=0;
   char body[10000]; size_t used=0;
   int n=snprintf(body,sizeof(body),
     "Snifzig - resumo horario Zigbee\nCanal: %u | periodo de captura: 60 min\n"
@@ -201,7 +207,7 @@ bool SnifzigCapture::send_report_() {
     const DeviceMetric &d=s.devices[i]; if(!d.frames) continue;
     const float ra=(float)d.rssi_sum/d.frames, la=(float)d.lqi_sum/d.frames;
     const uint8_t rg=rssi_grade(ra), lg=lqi_grade(la);
-    rssi_score_sum+=rg; lqi_score_sum+=lg; groups++;
+    rssi_group_sum+=ra; lqi_group_sum+=la; groups++;
     n=snprintf(body+used,sizeof(body)-used,"%c:%012llX | %lu | %.1f dBm (%s) | %.1f (%s)\n",
       d.address_mode==2?'S':'E',(unsigned long long)d.address,(unsigned long)d.frames,ra,grade(rg),la,grade(lg));
     if(n<0||(size_t)n>=sizeof(body)-used) return false; used+=(size_t)n;
@@ -209,21 +215,23 @@ bool SnifzigCapture::send_report_() {
   if(s.unidentified.frames) {
     const float ra=(float)s.unidentified.rssi_sum/s.unidentified.frames;
     const float la=(float)s.unidentified.lqi_sum/s.unidentified.frames;
-    const uint8_t rg=rssi_grade(ra),lg=lqi_grade(la); rssi_score_sum+=rg; lqi_score_sum+=lg; groups++;
+    const uint8_t rg=rssi_grade(ra),lg=lqi_grade(la); rssi_group_sum+=ra; lqi_group_sum+=la; groups++;
     n=snprintf(body+used,sizeof(body)-used,"Nao identificadas (grupo unico) | %lu | %.1f dBm (%s) | %.1f (%s)\n",
       (unsigned long)s.unidentified.frames,ra,grade(rg),la,grade(lg));
     if(n<0||(size_t)n>=sizeof(body)-used) return false; used+=(size_t)n;
   }
-  const uint8_t rssi_global=groups?(uint8_t)((rssi_score_sum+groups/2)/groups):0;
-  const uint8_t lqi_global=groups?(uint8_t)((lqi_score_sum+groups/2)/groups):0;
-  const uint8_t global=groups?(uint8_t)((rssi_global+lqi_global+1)/2):0;
+  const float rssi_global_mean=groups?rssi_group_sum/groups:0;
+  const float lqi_global_mean=groups?lqi_group_sum/groups:0;
+  const uint8_t rssi_global=groups?rssi_grade(rssi_global_mean):0;
+  const uint8_t lqi_global=groups?lqi_grade(lqi_global_mean):0;
+  const float global_score=groups?((float)rssi_global+lqi_global)/2.0f:0;
   n=snprintf(body+used,sizeof(body)-used,
     "\nDispositivos identificados: %u | grupos considerados na media: %u (cada um com peso igual)\n"
     "RSSI - %s | LQI - %s | Global - %s\n"
     "RSSI total: min %d | media %.1f | max %d\nLQI total: min %u | media %.1f | max %u\n"
     "Erros RX: invalidos %lu | libertacao %lu | reinicio %lu\n"
     "Nota: observacao passiva local; nao confirma entrega nem rotas.",
-    s.device_count,groups,groups?grade(rssi_global):"sem dados",groups?grade(lqi_global):"sem dados",groups?grade(global):"sem dados",
+     s.device_count,groups,rssi_global_mean,groups?grade(rssi_global):"sem dados",lqi_global_mean,groups?grade(lqi_global):"sem dados",groups?grade_score(global_score):"sem dados",
     s.frames_received?s.rssi_min:0,s.frames_received?(float)s.rssi_sum/s.frames_received:0,
     s.frames_received?s.rssi_max:0,s.frames_received?s.lqi_min:0,
     s.frames_received?(float)s.lqi_sum/s.frames_received:0,s.frames_received?s.lqi_max:0,
